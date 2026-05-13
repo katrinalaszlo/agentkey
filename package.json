@@ -1,0 +1,45 @@
+{
+  "name": "agentkey",
+  "version": "0.1.0",
+  "description": "Scoped, budgeted, time-bounded API keys for AI agents",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "llms.txt",
+    "AGENTS.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "agent",
+    "api-key",
+    "scoped-keys",
+    "budget",
+    "auth",
+    "mcp",
+    "ai-agent",
+    "capability-keys",
+    "rate-limiting",
+    "agent-experience"
+  ],
+  "author": "Katrina Laszlo <katrina.j.laszlo@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/katrinavassell/agentkey"
+  },
+  "homepage": "https://github.com/katrinavassell/agentkey#readme",
+  "peerDependencies": {
+    "pg": ">=8.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0",
+    "pg": "^8.0.0",
+    "@types/pg": "^8.0.0"
+  }
+}

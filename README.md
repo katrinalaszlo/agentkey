@@ -1,0 +1,159 @@
+# agentkey
+
+Scoped, budgeted, time-bounded API keys for AI agents.
+
+93% of AI agent projects use unscoped API keys. agentkey fixes the four layers nobody else covers:
+
+| Layer | What it controls | Who covers it today |
+|---|---|---|
+| Identity | Who is this | Clerk, Auth0 |
+| Account billing | How much can this org spend | Stripe, Metronome |
+| **Key scoping** | **What can this key do** | **agentkey** |
+| **Key budgeting** | **How much can this key spend** | **agentkey** |
+| **Key expiry** | **When does access end** | **agentkey** |
+| **Delegation** | **On whose behalf** | **agentkey** |
+
+## Install
+
+```bash
+npm install agentkey
+```
+
+## Quick Start
+
+```typescript
+import { AgentKey } from 'agentkey';
+
+const ak = new AgentKey({ pool }); // pass your pg Pool
+
+// Create a scoped key with a budget
+const key = await ak.create({
+  accountId: 'acct_123',
+  scopes: ['usage.read', 'proxy.chat'],
+  budgetCents: 5000,        // $50 cap
+  budgetPeriod: 'month',
+  expiresIn: '7d',
+  delegatedBy: 'user_456',  // human who authorized this agent
+  name: 'sales-agent',
+});
+// => { key: 'ak_7f3a...', id: 42, expiresAt: '2026-05-20T...' }
+
+// Validate on every request
+const result = await ak.validate(key.key);
+// => { valid: true, scopes: ['usage.read', 'proxy.chat'],
+//      budgetCents: 5000, budgetUsedCents: 1200,
+//      budgetRemainingCents: 3800, expiresAt: '...',
+//      delegatedBy: 'user_456', accountId: 'acct_123' }
+
+// Track spend after an LLM call
+await ak.trackUsage(key.key, { costCents: 15 });
+
+// Check if a scope is allowed
+ak.hasScope(result, 'proxy.chat');  // true
+ak.hasScope(result, 'billing.write'); // false
+```
+
+## How It Works
+
+agentkey adds columns to your existing API keys table and provides middleware to enforce scopes and budgets on every request.
+
+**One account, multiple keys, different capabilities:**
+
+```
+Account: Acme Corp (Pro plan, $100/month)
+  |
+  |-- ak_sales_...    scopes: [proxy.chat]         budget: $40/mo
+  |-- ak_analytics_.. scopes: [usage.read]          budget: $0 (free endpoints only)
+  |-- ak_agent_...    scopes: [proxy.chat, usage.read]  budget: $30/mo  expires: 7d
+```
+
+The account's plan sets the ceiling. Keys subdivide it. No single key can blow the whole month's budget.
+
+## API
+
+### `new AgentKey(options)`
+
+```typescript
+const ak = new AgentKey({
+  pool,              // pg Pool instance
+  tableName: 'sdk_api_keys',  // default
+  keyPrefix: 'ak_',           // default
+});
+```
+
+### `ak.create(options)`
+
+Create a new scoped key.
+
+| Option | Type | Required | Description |
+|---|---|---|---|
+| `accountId` | string/number | yes | Account this key belongs to |
+| `scopes` | string[] | no | Allowed actions. null = unlimited |
+| `budgetCents` | number | no | Spending cap in cents. null = unlimited |
+| `budgetPeriod` | 'day' \| 'month' \| null | no | Budget reset interval |
+| `expiresIn` | string | no | Duration ('1h', '7d', '30d'). null = no expiry |
+| `delegatedBy` | string | no | User ID of the human who authorized this key |
+| `name` | string | no | Label for this key |
+
+### `ak.validate(rawKey)`
+
+Validate a key and return its metadata. Returns `{ valid: false, reason: string }` for invalid, expired, or revoked keys.
+
+### `ak.trackUsage(rawKey, { costCents })`
+
+Increment budget usage. Returns `{ success: false, reason: 'budget_exceeded' }` if the key's budget cap would be exceeded.
+
+### `ak.hasScope(validationResult, scope)`
+
+Check if a validated key has a specific scope. Returns boolean.
+
+### `ak.revoke(keyId)`
+
+Soft-revoke a key (sets revoked_at timestamp).
+
+## Express Middleware
+
+```typescript
+import { agentKeyMiddleware } from 'agentkey/express';
+
+// Protect routes with scope checks
+app.get('/api/usage', agentKeyMiddleware(ak, { scope: 'usage.read' }), handler);
+app.post('/api/proxy', agentKeyMiddleware(ak, { scope: 'proxy.chat' }), handler);
+
+// Budget is tracked automatically when you call ak.trackUsage()
+```
+
+## Database Migration
+
+agentkey adds columns to your existing keys table:
+
+```sql
+ALTER TABLE sdk_api_keys
+  ADD COLUMN IF NOT EXISTS scopes TEXT[],
+  ADD COLUMN IF NOT EXISTS budget_cents INTEGER,
+  ADD COLUMN IF NOT EXISTS budget_used_cents INTEGER DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS budget_period TEXT,
+  ADD COLUMN IF NOT EXISTS budget_reset_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS delegated_by TEXT;
+```
+
+Run `ak.migrate()` to apply automatically, or use the SQL above in your own migration system.
+
+## Why Not Just Use...
+
+**Clerk/Auth0**: They scope identity, not budget. M2M tokens have scopes but no credit caps, no usage metering per key.
+
+**Stripe/Metronome**: They scope account billing, not per-key. Can't tell which of 15 keys drove the cost.
+
+**Rate limiters**: They scope throughput (requests/min), not dollars. 10 requests at $50 each stays under the rate limit while spending $500.
+
+**Custom code**: This is what everyone builds. It takes weeks, it's different at every company, it has bugs. We built it twice (People Data Labs, Observe) before extracting it.
+
+## Built At
+
+Extracted from [Observe](https://github.com/katrinavassell/observe), an open-source AI cost observability platform. Battle-tested on real agent traffic before being packaged as a standalone library.
+
+## License
+
+MIT

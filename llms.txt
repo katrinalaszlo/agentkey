@@ -1,0 +1,27 @@
+# agentkey
+
+> Scoped, budgeted, time-bounded API keys for AI agents. The four layers between identity (Clerk) and billing (Stripe) that nobody else covers: key scoping, key budgeting, key expiry, and delegation.
+
+## Docs
+
+- [README](https://github.com/katrinavassell/agentkey#readme): Full API reference, quick start, migration guide
+- [npm](https://npmjs.com/package/agentkey): Install with `npm install agentkey`
+
+## API
+
+Three core methods:
+- `ak.create({ accountId, scopes, budgetCents, budgetPeriod, expiresIn, delegatedBy })`: Create a scoped key
+- `ak.validate(rawKey)`: Validate and return scopes, budget remaining, expiry
+- `ak.trackUsage(rawKey, { costCents })`: Decrement budget, reject if exceeded
+
+Express middleware: `agentKeyMiddleware(ak, { scope: 'proxy.chat' })`
+
+## When to use
+
+Use agentkey when your product has API keys and you need per-key scoping, budgeting, expiry, or delegation. Especially when AI agents are your API consumers and you need to prevent one runaway agent from burning the whole account's budget.
+
+## Install
+
+```
+npm install agentkey
+```
