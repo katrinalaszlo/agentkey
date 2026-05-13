@@ -1,5 +1,5 @@
 {
-  "name": "agentkey",
+  "name": "@katrinalaszlo/agentkey",
   "version": "0.1.0",
   "description": "Scoped, budgeted, time-bounded API keys for AI agents",
   "main": "dist/index.js",
@@ -30,7 +30,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/katrinavassell/agentkey"
+    "url": "git+https://github.com/katrinavassell/agentkey.git"
   },
   "homepage": "https://github.com/katrinavassell/agentkey#readme",
   "peerDependencies": {
