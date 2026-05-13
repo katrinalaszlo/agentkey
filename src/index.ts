@@ -20,6 +20,8 @@ export type {
 };
 
 export { agentKeyMiddleware } from "./middleware.js";
+export { createAgentKeyRoutes } from "./routes.js";
+export type { RouteOptions } from "./routes.js";
 
 function parseDuration(dur: string): number {
   const match = dur.match(/^(\d+)(h|d|m)$/);

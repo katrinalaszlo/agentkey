@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: agentkey_test
+      POSTGRES_USER: agentkey
+      POSTGRES_PASSWORD: agentkey
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentkey"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+  test:
+    image: node:22-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      DATABASE_URL: postgres://agentkey:agentkey@postgres:5432/agentkey_test
+    command: sh -c "npm install && npm test"
