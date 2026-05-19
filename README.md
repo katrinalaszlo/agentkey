@@ -2,7 +2,7 @@
 
 Scoped, budgeted, time-bounded API keys for AI agents.
 
-93% of AI agent projects use unscoped API keys. agentkey fixes the four layers nobody else covers:
+What happens when a customer or user wants to control or limit usage by API key, not user, account or org? 93% of AI agent projects use unscoped API keys. agentkey fixes the four layers nobody else covers:
 
 | Layer | What it controls | Who covers it today |
 |---|---|---|
@@ -148,7 +148,7 @@ Run `ak.migrate()` to apply automatically, or use the SQL above in your own migr
 
 **Rate limiters**: They scope throughput (requests/min), not dollars. 10 requests at $50 each stays under the rate limit while spending $500.
 
-**Custom code**: This is what everyone builds. It takes weeks, it's different at every company, it has bugs. We built it twice (People Data Labs, Observe) before extracting it.
+**Custom code**: This is what everyone builds. It takes weeks, it's different at every company, it has bugs.
 
 ## Built At
 
