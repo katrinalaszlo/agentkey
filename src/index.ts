@@ -36,6 +36,13 @@ function parseDuration(dur: string): number {
   throw new Error(`Invalid duration: ${dur}`);
 }
 
+// Absolute expiry for a duration string, or null for no expiry. Exported so
+// delegation routes can attenuate a child key's expiry to its parent.
+export function expiryFromDuration(dur: string | null | undefined): Date | null {
+  if (!dur) return null;
+  return new Date(Date.now() + parseDuration(dur));
+}
+
 function nextCalendarMonth(from: Date): Date {
   const year = from.getFullYear();
   const month = from.getMonth();
@@ -73,9 +80,7 @@ export class AgentKey {
 
   validateScopes(scopes: string[]): { valid: boolean; invalid?: string[] } {
     if (!this.validScopes) return { valid: true };
-    const invalid = scopes.filter(
-      (s) => !this.validScopes!.has(s) && s !== "admin",
-    );
+    const invalid = scopes.filter((s) => !this.validScopes!.has(s));
     return invalid.length === 0 ? { valid: true } : { valid: false, invalid };
   }
 
@@ -85,6 +90,18 @@ export class AgentKey {
       if (!check.valid) {
         throw new Error(`Invalid scopes: ${check.invalid!.join(", ")}`);
       }
+    }
+
+    // Validate budget_period at runtime. An unrecognized value would fall through
+    // to the "no period" branch below (budget_reset_at stays NULL) while still
+    // storing budget_cents, which permanently disables resets — the key silently
+    // becomes a one-shot lifetime cap. Fail loudly instead, like Invalid scopes.
+    if (
+      opts.budgetPeriod != null &&
+      opts.budgetPeriod !== "day" &&
+      opts.budgetPeriod !== "month"
+    ) {
+      throw new Error(`Invalid budget period: ${opts.budgetPeriod}`);
     }
 
     const rawKey = `${this.keyPrefix}${crypto.randomBytes(24).toString("hex")}`;
@@ -171,12 +188,28 @@ export class AgentKey {
             : nextDay(newResetAt);
       } while (newResetAt < now);
 
-      await this.pool.query(
-        `UPDATE ${this.tableName} SET budget_used_cents = 0, budget_reset_at = $1 WHERE id = $2`,
+      // Atomic guard: only the writer that still sees an elapsed period resets,
+      // so a concurrent trackUsage (which can also roll the period) or another
+      // validate can't be clobbered back to zero. On a miss, someone already
+      // rolled it — re-read the committed row instead of assuming a fresh zero.
+      const upd = await this.pool.query(
+        `UPDATE ${this.tableName} SET budget_used_cents = 0, budget_reset_at = $1
+         WHERE id = $2 AND budget_reset_at < NOW()`,
         [newResetAt.toISOString(), row.id],
       );
-      row.budget_used_cents = 0;
-      row.budget_reset_at = newResetAt;
+      if ((upd.rowCount ?? 0) > 0) {
+        row.budget_used_cents = 0;
+        row.budget_reset_at = newResetAt;
+      } else {
+        const fresh = await this.pool.query(
+          `SELECT budget_used_cents, budget_reset_at FROM ${this.tableName} WHERE id = $1`,
+          [row.id],
+        );
+        if (fresh.rows.length > 0) {
+          row.budget_used_cents = fresh.rows[0].budget_used_cents;
+          row.budget_reset_at = fresh.rows[0].budget_reset_at;
+        }
+      }
     }
 
     if (
@@ -225,24 +258,41 @@ export class AgentKey {
     }
 
     if (opts.costCents <= 0) {
-      return { success: true, budgetUsedCents: 0, budgetRemainingCents: null };
+      // No-op charge. Don't fabricate budget numbers: a SELECT-free shortcut
+      // would otherwise report "0 used / unlimited remaining" for a capped key.
+      return { success: true };
     }
 
     const keyHash = crypto.createHash("sha256").update(rawKey).digest("hex");
-    const costRounded = Math.round(opts.costCents);
+    // Round up: a positive sub-cent cost must consume at least one whole cent,
+    // not round to a free $0 charge (whole cents is the schema's billing unit).
+    const costRounded = Math.ceil(opts.costCents);
 
-    // Atomic check-and-increment. The budget guard lives in the WHERE clause so
-    // concurrent charges serialize on the row lock and re-evaluate against the
-    // committed balance — a SELECT-then-UPDATE here would let parallel requests
-    // each read the old balance and overspend the cap.
+    // Next period boundary measured from now. A single step is always in the
+    // future even if several periods elapsed since the key was last touched.
+    const now = new Date();
+    const nextDayReset = nextDay(now).toISOString();
+    const nextMonthReset = nextCalendarMonth(now).toISOString();
+
+    // Atomic reset-then-charge in one row-locked UPDATE. Resetting here (not only
+    // in validate) keeps trackUsage correct on its own: once a key's period has
+    // rolled over it starts the new period at zero instead of staying locked
+    // against last period's spend. The budget guard lives in the WHERE clause so
+    // concurrent charges serialize on the row lock — a SELECT-then-UPDATE would
+    // let parallel requests read a stale balance and overspend the cap.
+    const rolled =
+      "budget_period IS NOT NULL AND budget_reset_at IS NOT NULL AND budget_reset_at <= NOW()";
+    const baseUsed = `CASE WHEN ${rolled} THEN 0 ELSE COALESCE(budget_used_cents, 0) END`;
     const result = await this.pool.query(
       `UPDATE ${this.tableName}
-       SET budget_used_cents = COALESCE(budget_used_cents, 0) + $1
+       SET budget_used_cents = (${baseUsed}) + $1,
+           budget_reset_at = CASE WHEN ${rolled}
+             THEN (CASE WHEN budget_period = 'month' THEN $4::timestamptz ELSE $3::timestamptz END)
+             ELSE budget_reset_at END
        WHERE key_hash = $2 AND revoked_at IS NULL
-         AND (budget_cents IS NULL
-              OR COALESCE(budget_used_cents, 0) + $1 <= budget_cents)
+         AND (budget_cents IS NULL OR (${baseUsed}) + $1 <= budget_cents)
        RETURNING budget_used_cents, budget_cents`,
-      [costRounded, keyHash],
+      [costRounded, keyHash, nextDayReset, nextMonthReset],
     );
 
     if (result.rows.length === 0) {

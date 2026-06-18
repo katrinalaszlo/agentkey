@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import pg from "pg";
 import express from "express";
 import type { Server } from "http";
-import { AgentKey, createAgentKeyRoutes } from "../index.js";
+import { AgentKey, createAgentKeyRoutes, agentKeyMiddleware } from "../index.js";
 
 const TEST_DB =
   process.env.DATABASE_URL ??
@@ -244,6 +244,33 @@ describe("trackUsage", () => {
     const result = await ak.trackUsage(created.key, { costCents: 20 });
     expect(result.success).toBe(false);
     expect(result.reason).toBe("budget_exceeded");
+  });
+
+  // Regression: trackUsage ignored the period reset (only validate reset it), so
+  // a charge after the period rolled over was measured against last period's
+  // spend and wrongly rejected. trackUsage now resets-then-charges atomically.
+  it("resets the period inside trackUsage, without a preceding validate", async () => {
+    const created = await ak.create({
+      accountId: "acct_track_reset",
+      budgetCents: 100,
+      budgetPeriod: "day",
+    });
+    // Exhaust this period.
+    const exhausted = await ak.trackUsage(created.key, { costCents: 100 });
+    expect(exhausted.success).toBe(true);
+    const blocked = await ak.trackUsage(created.key, { costCents: 10 });
+    expect(blocked.success).toBe(false);
+    expect(blocked.reason).toBe("budget_exceeded");
+
+    // Roll the period over, then charge again WITHOUT calling validate first.
+    await pool.query(
+      "UPDATE sdk_api_keys SET budget_reset_at = NOW() - INTERVAL '2 days' WHERE id = $1",
+      [created.id],
+    );
+    const fresh = await ak.trackUsage(created.key, { costCents: 30 });
+    expect(fresh.success).toBe(true);
+    expect(fresh.budgetUsedCents).toBe(30);
+    expect(fresh.budgetRemainingCents).toBe(70);
   });
 
   it("allows unlimited usage with null budget", async () => {
@@ -515,5 +542,190 @@ describe("routes (signup with configured scopes)", () => {
       body: JSON.stringify({ email: "user@example.com", scopes: ["admin"] }),
     });
     expect(bad.status).toBe(400);
+  });
+});
+
+describe("fixes — 2026-06-18 bug-hunt regressions", () => {
+  // #4: an unvalidated budget_period silently stored a bad string and disabled
+  // resets (one-shot lifetime cap). create() now rejects it like a bad scope.
+  it("create rejects an invalid budget_period", async () => {
+    await expect(
+      ak.create({
+        accountId: "acct_badperiod",
+        budgetCents: 100,
+        budgetPeriod: "weekly" as unknown as "day",
+      }),
+    ).rejects.toThrow(/Invalid budget period/);
+  });
+
+  // #14: validateScopes hard-allowed 'admin' regardless of the allow-list. It is
+  // now gated like any other scope.
+  it("create rejects 'admin' when validScopes excludes it", async () => {
+    const limitedAk = new AgentKey({
+      pool,
+      keyPrefix: "test_",
+      validScopes: ["read"],
+    });
+    await expect(
+      limitedAk.create({ accountId: "acct_noadmin", scopes: ["admin"] }),
+    ).rejects.toThrow(/Invalid scopes/);
+  });
+
+  // #10: a positive sub-half-cent cost rounded to a free $0 charge. Rounds up now.
+  it("trackUsage charges at least one cent for a sub-cent cost", async () => {
+    const k = await ak.create({ accountId: "acct_subcent", budgetCents: 100 });
+    const r = await ak.trackUsage(k.key, { costCents: 0.4 });
+    expect(r.success).toBe(true);
+    expect(r.budgetUsedCents).toBe(1);
+  });
+
+  // #11: a $0 charge reported fabricated "0 used / unlimited remaining".
+  it("trackUsage no-ops a $0 charge without fabricating budget numbers", async () => {
+    const k = await ak.create({ accountId: "acct_zerocharge", budgetCents: 100 });
+    await ak.trackUsage(k.key, { costCents: 50 });
+    const r = await ak.trackUsage(k.key, { costCents: 0 });
+    expect(r.success).toBe(true);
+    expect(r.budgetUsedCents).toBeUndefined();
+    expect(r.budgetRemainingCents).toBeUndefined();
+  });
+
+  // #1: middleware had no try/catch — a rejecting validate() (DB fault) hung the
+  // request and could crash the process. It now fails closed with a 500.
+  describe("middleware fails closed when validate throws", () => {
+    let server: Server;
+    let base: string;
+    beforeAll(() => {
+      const brokenAk = new AgentKey({
+        pool: {
+          query: () => Promise.reject(new Error("db down")),
+        } as unknown as pg.Pool,
+      });
+      const app = express();
+      app.use(express.json());
+      app.get("/protected", agentKeyMiddleware(brokenAk), (_req, res) =>
+        res.json({ ok: true }),
+      );
+      server = app.listen(0);
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      base = `http://localhost:${port}`;
+    });
+    afterAll(() => server.close());
+
+    it("returns 500, not a hang or a crash", async () => {
+      const res = await fetch(`${base}/protected`, {
+        headers: { Authorization: "Bearer test_anything" },
+      });
+      expect(res.status).toBe(500);
+    });
+  });
+
+  // #2 + #3: route-level ownership and delegation attenuation.
+  describe("route attenuation", () => {
+    let server: Server;
+    let base: string;
+    beforeAll(() => {
+      const app = express();
+      app.use(express.json());
+      // requireEmailForSignup:false exercises the anonymous-signup path.
+      app.use(
+        createAgentKeyRoutes(ak, {
+          requireEmailForSignup: false,
+          signupScopes: ["read"],
+        }),
+      );
+      server = app.listen(0);
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      base = `http://localhost:${port}`;
+    });
+    afterAll(() => server.close());
+
+    const auth = (key: string) => ({
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+    });
+
+    // #2: anonymous signups must each get their own account, not a shared bucket,
+    // or they could revoke/mint against each other's keys.
+    it("gives each anonymous /signup its own account", async () => {
+      const a = await (
+        await fetch(`${base}/signup`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        })
+      ).json();
+      const b = await (
+        await fetch(`${base}/signup`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        })
+      ).json();
+
+      const res = await fetch(`${base}/sdk-keys/${a.id}`, {
+        method: "DELETE",
+        headers: auth(b.key),
+      });
+      expect(res.status).toBe(404);
+      const stillValid = await ak.validate(a.key);
+      expect(stillValid.valid).toBe(true);
+    });
+
+    // #3: a budgeted key cannot mint a larger or uncapped child.
+    it("attenuates child budget to the caller", async () => {
+      const caller = await ak.create({
+        accountId: "acct_atten_budget",
+        scopes: ["read"],
+        budgetCents: 1000,
+        budgetPeriod: "month",
+      });
+      const over = await fetch(`${base}/sdk-keys`, {
+        method: "POST",
+        headers: auth(caller.key),
+        body: JSON.stringify({ budget_cents: 5000 }),
+      });
+      expect(over.status).toBe(403);
+      const missing = await fetch(`${base}/sdk-keys`, {
+        method: "POST",
+        headers: auth(caller.key),
+        body: JSON.stringify({}),
+      });
+      expect(missing.status).toBe(403);
+      const ok = await fetch(`${base}/sdk-keys`, {
+        method: "POST",
+        headers: auth(caller.key),
+        body: JSON.stringify({ budget_cents: 500 }),
+      });
+      expect(ok.status).toBe(201);
+    });
+
+    // #3: a short-lived key cannot mint a longer-lived child.
+    it("attenuates child expiry to the caller", async () => {
+      const caller = await ak.create({
+        accountId: "acct_atten_expiry",
+        scopes: ["read"],
+        expiresIn: "1h",
+      });
+      const longer = await fetch(`${base}/sdk-keys`, {
+        method: "POST",
+        headers: auth(caller.key),
+        body: JSON.stringify({ expires_in: "365d" }),
+      });
+      expect(longer.status).toBe(403);
+      const missing = await fetch(`${base}/sdk-keys`, {
+        method: "POST",
+        headers: auth(caller.key),
+        body: JSON.stringify({}),
+      });
+      expect(missing.status).toBe(403);
+      const ok = await fetch(`${base}/sdk-keys`, {
+        method: "POST",
+        headers: auth(caller.key),
+        body: JSON.stringify({ expires_in: "30m" }),
+      });
+      expect(ok.status).toBe(201);
+    });
   });
 });

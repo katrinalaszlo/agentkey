@@ -145,7 +145,7 @@ app.use(createAgentKeyRoutes(ak, { signupScopes: ['proxy.chat'] }));
 
 Security model:
 - `POST /signup` is **unauthenticated** (an agent self-serves a key with just an email). It only grants scopes listed in `signupScopes`. With `signupScopes` unset it issues a **scopeless** key — it never passes caller-supplied scopes (or an unlimited scope) through, so no one can mint an `admin` key from this endpoint. Set your own `budget_cents`/`expires_in` caps in front of it if you expose it publicly.
-- `POST /sdk-keys` requires a valid key and can only grant scopes the calling key already holds.
+- `POST /sdk-keys` requires a valid key and attenuates to the caller: it can only grant scopes the calling key already holds, and a child key's budget and expiry cannot exceed the calling key's.
 - `DELETE /sdk-keys/:id` only revokes keys owned by the calling key's account.
 
 ## Database Migration

@@ -1,5 +1,7 @@
+import crypto from "crypto";
 import { Router, Request, Response } from "express";
 import type { AgentKey } from "./index.js";
+import { expiryFromDuration } from "./index.js";
 import type { ValidateResult } from "./types.js";
 import { agentKeyMiddleware } from "./middleware.js";
 
@@ -62,8 +64,14 @@ export function createAgentKeyRoutes(
         grantedScopes = allowedScopes;
       }
 
+      // account_id is the ownership boundary for revoke and mint. /signup is
+      // unauthenticated, so never let callers share or choose it: mint a unique
+      // namespace when no usable email is present (covers email '' and the
+      // requireEmailForSignup:false path). Otherwise anonymous callers land in a
+      // shared bucket and can revoke/mint against each other's keys.
+      const hasEmail = typeof email === "string" && email.length > 0;
       const key = await ak.create({
-        accountId: email ?? "anonymous",
+        accountId: hasEmail ? email : `anon_${crypto.randomUUID()}`,
         scopes: grantedScopes,
         budgetCents: budget_cents ?? null,
         budgetPeriod: budget_period ?? null,
@@ -74,7 +82,11 @@ export function createAgentKeyRoutes(
       res.status(201).json(key);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes("Invalid scopes") || msg.includes("Invalid duration")) {
+      if (
+        msg.includes("Invalid scopes") ||
+        msg.includes("Invalid duration") ||
+        msg.includes("Invalid budget period")
+      ) {
         return res.status(400).json({ error: msg });
       }
       console.error("POST /signup error:", error);
@@ -133,6 +145,31 @@ export function createAgentKeyRoutes(
           }
         }
 
+        // Attenuate budget and expiry to the caller, the same way scopes are
+        // attenuated above: a capped or short-lived key must not mint an
+        // uncapped or longer-lived child on its own account.
+        const callerBudget = req.agentKey.budgetCents;
+        if (
+          callerBudget != null &&
+          (budget_cents == null || budget_cents > callerBudget)
+        ) {
+          return res.status(403).json({
+            error: `Child budget_cents must be set and not exceed your budget of ${callerBudget}`,
+          });
+        }
+        if (req.agentKey.expiresAt != null) {
+          const childExpiry = expiryFromDuration(expires_in);
+          if (
+            childExpiry == null ||
+            childExpiry.getTime() > new Date(req.agentKey.expiresAt).getTime()
+          ) {
+            return res.status(403).json({
+              error:
+                "Child key expiry must be set and not exceed your key's expiry",
+            });
+          }
+        }
+
         const key = await ak.create({
           accountId: req.agentKey.accountId,
           userId: req.agentKey.userId,
@@ -149,7 +186,8 @@ export function createAgentKeyRoutes(
         const msg = error instanceof Error ? error.message : String(error);
         if (
           msg.includes("Invalid scopes") ||
-          msg.includes("Invalid duration")
+          msg.includes("Invalid duration") ||
+          msg.includes("Invalid budget period")
         ) {
           return res.status(400).json({ error: msg });
         }
