@@ -2,7 +2,15 @@
 
 Scoped, budgeted, time-bounded API keys for AI agents.
 
-What happens when a customer or user wants to control or limit usage by API key, not user, account or org? agentkey fixes the four layers nobody else covers:
+## Why
+
+When I led self-serve at a usage-based data company, one of the most common requests was credit limits per API key. Users have asked for the same at Tanso. Account- and user-level limits are critical for enterprises, but they're heavy. What's the simple version for startups?
+
+agentkey is that: scope what a key can do, cap what it can spend, set when it expires, and record which human authorized it. It adds a few columns to your existing keys table — it doesn't replace your auth.
+
+## What it covers
+
+The layers nobody else covers, per key:
 
 | Layer | What it controls | Who covers it today |
 |---|---|---|
