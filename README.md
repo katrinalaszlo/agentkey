@@ -2,7 +2,7 @@
 
 Scoped, budgeted, time-bounded API keys for AI agents.
 
-What happens when a customer or user wants to control or limit usage by API key, not user, account or org? 93% of AI agent projects use unscoped API keys. agentkey fixes the four layers nobody else covers:
+What happens when a customer or user wants to control or limit usage by API key, not user, account or org? agentkey fixes the four layers nobody else covers:
 
 | Layer | What it controls | Who covers it today |
 |---|---|---|
