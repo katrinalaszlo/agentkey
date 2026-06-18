@@ -114,7 +114,7 @@ Soft-revoke a key (sets revoked_at timestamp).
 ## Express Middleware
 
 ```typescript
-import { agentKeyMiddleware } from '@katrinalaszlo/agentkey/express';
+import { agentKeyMiddleware } from '@katrinalaszlo/agentkey';
 
 // Protect routes with scope checks
 app.get('/api/usage', agentKeyMiddleware(ak, { scope: 'usage.read' }), handler);
@@ -129,6 +129,7 @@ agentkey adds columns to your existing keys table:
 
 ```sql
 ALTER TABLE sdk_api_keys
+  ADD COLUMN IF NOT EXISTS user_id TEXT,
   ADD COLUMN IF NOT EXISTS scopes TEXT[],
   ADD COLUMN IF NOT EXISTS budget_cents INTEGER,
   ADD COLUMN IF NOT EXISTS budget_used_cents INTEGER DEFAULT 0,
