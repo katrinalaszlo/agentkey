@@ -37,7 +37,15 @@ function parseDuration(dur: string): number {
 }
 
 function nextCalendarMonth(from: Date): Date {
-  return new Date(from.getFullYear(), from.getMonth() + 1, from.getDate());
+  const year = from.getFullYear();
+  const month = from.getMonth();
+  // Clamp to the last day of the target month so Jan 31 -> Feb 28, not Mar 3.
+  const lastDayOfNextMonth = new Date(year, month + 2, 0).getDate();
+  return new Date(
+    year,
+    month + 1,
+    Math.min(from.getDate(), lastDayOfNextMonth),
+  );
 }
 
 function nextDay(from: Date): Date {

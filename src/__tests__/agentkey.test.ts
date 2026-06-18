@@ -160,6 +160,28 @@ describe("validate", () => {
     expect(result.name).toBe("default");
   });
 
+  // Regression: nextCalendarMonth overflowed for end-of-month dates (Jan 31 ->
+  // Mar 3, skipping February and drifting to the 3rd thereafter). Found by /qa
+  // on 2026-06-18.
+  it("rolls a month-end reset date to a real day, not an overflow", async () => {
+    const created = await ak.create({
+      accountId: "acct_month_end",
+      budgetCents: 100,
+      budgetPeriod: "month",
+    });
+    // Force a reset date on the 31st, far in the past, so validate() rolls it.
+    await pool.query(
+      "UPDATE sdk_api_keys SET budget_reset_at = '2020-01-31T12:00:00Z' WHERE id = $1",
+      [created.id],
+    );
+    const result = await ak.validate(created.key);
+    expect(result.valid).toBe(true);
+    if (!result.valid) return;
+    // Clamped to month-end (28-31). The overflow bug drifted it to the 3rd.
+    const day = new Date(result.budgetResetAt!).getDate();
+    expect(day).toBeGreaterThanOrEqual(28);
+  });
+
   // Regression: budget reset never fired for an exhausted key because the
   // budget_exceeded check ran before the reset. Found by /qa on 2026-06-18.
   it("resets an exhausted budget once the period rolls over", async () => {
