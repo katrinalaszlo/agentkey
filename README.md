@@ -91,7 +91,7 @@ Create a new scoped key.
 | `scopes` | string[] | no | Allowed actions. null = unlimited |
 | `budgetCents` | number | no | Spending cap in cents. null = unlimited |
 | `budgetPeriod` | 'day' \| 'month' \| null | no | Budget reset interval |
-| `expiresIn` | string | no | Duration ('1h', '7d', '30d'). null = no expiry |
+| `expiresIn` | string | no | Duration: `m`=minutes, `h`=hours, `d`=days, `mo`=months (e.g. `'30m'`, `'1h'`, `'7d'`, `'1mo'`). null = no expiry |
 | `delegatedBy` | string | no | User ID of the human who authorized this key |
 | `name` | string | no | Label for this key |
 
@@ -122,6 +122,21 @@ app.post('/api/proxy', agentKeyMiddleware(ak, { scope: 'proxy.chat' }), handler)
 
 // Budget is tracked automatically when you call ak.trackUsage()
 ```
+
+## Self-Serve Routes (optional)
+
+`createAgentKeyRoutes(ak, opts)` mounts `POST /signup`, `GET /sdk-keys/me`, `POST /sdk-keys`, and `DELETE /sdk-keys/:id`.
+
+```typescript
+import { createAgentKeyRoutes } from '@katrinalaszlo/agentkey';
+
+app.use(createAgentKeyRoutes(ak, { signupScopes: ['proxy.chat'] }));
+```
+
+Security model:
+- `POST /signup` is **unauthenticated** (an agent self-serves a key with just an email). It only grants scopes listed in `signupScopes`. With `signupScopes` unset it issues a **scopeless** key — it never passes caller-supplied scopes (or an unlimited scope) through, so no one can mint an `admin` key from this endpoint. Set your own `budget_cents`/`expires_in` caps in front of it if you expose it publicly.
+- `POST /sdk-keys` requires a valid key and can only grant scopes the calling key already holds.
+- `DELETE /sdk-keys/:id` only revokes keys owned by the calling key's account.
 
 ## Database Migration
 

@@ -50,7 +50,7 @@ export interface ValidateFailure {
 
 export interface TrackUsageResult {
   success: boolean;
-  reason?: "budget_exceeded" | "invalid_key";
+  reason?: "budget_exceeded" | "invalid_key" | "invalid_cost";
   budgetUsedCents?: number;
   budgetRemainingCents?: number | null;
 }

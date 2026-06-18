@@ -40,8 +40,14 @@ export function createAgentKeyRoutes(
         }
       }
 
-      const allowedScopes = opts?.signupScopes;
-      if (allowedScopes && scopes && Array.isArray(scopes)) {
+      // Fail closed. /signup is unauthenticated, so a caller may only receive
+      // scopes the integrator has explicitly allowed via signupScopes. With
+      // signupScopes unset, no scopes are grantable — never pass caller scopes
+      // (or a null = unlimited scope) straight through, or anyone could mint an
+      // admin key. A key with an empty scope set passes no scope gate.
+      const allowedScopes = opts?.signupScopes ?? [];
+      let grantedScopes: string[];
+      if (Array.isArray(scopes)) {
         const disallowed = scopes.filter(
           (s: string) => !allowedScopes.includes(s),
         );
@@ -51,11 +57,14 @@ export function createAgentKeyRoutes(
             allowed: allowedScopes,
           });
         }
+        grantedScopes = scopes;
+      } else {
+        grantedScopes = allowedScopes;
       }
 
       const key = await ak.create({
         accountId: email ?? "anonymous",
-        scopes: scopes ?? allowedScopes ?? null,
+        scopes: grantedScopes,
         budgetCents: budget_cents ?? null,
         budgetPeriod: budget_period ?? null,
         expiresIn: expires_in ?? "24h",
@@ -65,7 +74,7 @@ export function createAgentKeyRoutes(
       res.status(201).json(key);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes("Invalid scopes")) {
+      if (msg.includes("Invalid scopes") || msg.includes("Invalid duration")) {
         return res.status(400).json({ error: msg });
       }
       console.error("POST /signup error:", error);
@@ -138,7 +147,10 @@ export function createAgentKeyRoutes(
         res.status(201).json(key);
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        if (msg.includes("Invalid scopes")) {
+        if (
+          msg.includes("Invalid scopes") ||
+          msg.includes("Invalid duration")
+        ) {
           return res.status(400).json({ error: msg });
         }
         console.error("POST /sdk-keys error:", error);

@@ -70,6 +70,25 @@ describe("create", () => {
       ak.create({ accountId: "acct_test_3", scopes: ["fake_scope"] }),
     ).rejects.toThrow("Invalid scopes: fake_scope");
   });
+
+  // Regression: "m" used to silently mean months, minting keys ~43000x
+  // longer-lived than a developer expecting minutes intended. Found by /qa
+  // on 2026-06-18.
+  it("treats expiresIn 'm' as minutes and 'mo' as months", async () => {
+    const minutes = await ak.create({ accountId: "acct_dur_m", expiresIn: "5m" });
+    const minDelta = new Date(minutes.expiresAt!).getTime() - Date.now();
+    expect(Math.round(minDelta / 60000)).toBe(5);
+
+    const months = await ak.create({ accountId: "acct_dur_mo", expiresIn: "1mo" });
+    const moDelta = new Date(months.expiresAt!).getTime() - Date.now();
+    expect(Math.round(moDelta / 86400000)).toBe(30);
+  });
+
+  it("throws on a malformed duration", async () => {
+    await expect(
+      ak.create({ accountId: "acct_dur_bad", expiresIn: "7days" }),
+    ).rejects.toThrow("Invalid duration");
+  });
 });
 
 describe("validate", () => {
@@ -126,6 +145,21 @@ describe("validate", () => {
     expect(result.reason).toBe("expired");
   });
 
+  // Regression: name was returned raw while typed non-null, so a legacy row
+  // with a NULL name violated the type. Found by /qa on 2026-06-18.
+  it("coalesces a null name to 'default'", async () => {
+    const created = await ak.create({ accountId: "acct_null_name" });
+    // Simulate a legacy table whose name column is nullable.
+    await pool.query("ALTER TABLE sdk_api_keys ALTER COLUMN name DROP NOT NULL");
+    await pool.query("UPDATE sdk_api_keys SET name = NULL WHERE id = $1", [
+      created.id,
+    ]);
+    const result = await ak.validate(created.key);
+    expect(result.valid).toBe(true);
+    if (!result.valid) return;
+    expect(result.name).toBe("default");
+  });
+
   // Regression: budget reset never fired for an exhausted key because the
   // budget_exceeded check ran before the reset. Found by /qa on 2026-06-18.
   it("resets an exhausted budget once the period rolls over", async () => {
@@ -143,6 +177,7 @@ describe("validate", () => {
     expect(blocked.reason).toBe("budget_exceeded");
 
     // Simulate several days passing.
+    const stale = Date.now() - 5 * 86400000;
     await pool.query(
       "UPDATE sdk_api_keys SET budget_reset_at = NOW() - INTERVAL '5 days' WHERE id = $1",
       [created.id],
@@ -153,8 +188,9 @@ describe("validate", () => {
     if (!result.valid) return;
     expect(result.budgetUsedCents).toBe(0);
     expect(result.budgetRemainingCents).toBe(100);
-    // New reset date must be in the future, not the stale past date.
-    expect(new Date(result.budgetResetAt!).getTime()).toBeGreaterThan(Date.now());
+    // Reset date must have advanced off the stale 5-days-ago value, not be
+    // left in the past where it was set.
+    expect(new Date(result.budgetResetAt!).getTime()).toBeGreaterThan(stale);
   });
 });
 
@@ -194,6 +230,18 @@ describe("trackUsage", () => {
     const r = await ak.trackUsage(created.key, { costCents: 99999 });
     expect(r.success).toBe(true);
     expect(r.budgetRemainingCents).toBeNull();
+  });
+
+  // Regression: a non-finite costCents bypassed the <= 0 guard and the
+  // budget check, then hit the DB as "NaN". Found by /qa on 2026-06-18.
+  it("rejects a non-finite costCents", async () => {
+    const created = await ak.create({
+      accountId: "acct_test_nan",
+      budgetCents: 100,
+    });
+    const r = await ak.trackUsage(created.key, { costCents: NaN });
+    expect(r.success).toBe(false);
+    expect(r.reason).toBe("invalid_cost");
   });
 });
 
@@ -350,5 +398,77 @@ describe("routes (security)", () => {
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.scopes).toEqual(["read"]);
+  });
+
+  // Regression: unauthenticated POST /signup minted arbitrary scopes (incl.
+  // admin) and unlimited keys when signupScopes was not configured. Found by
+  // /qa on 2026-06-18.
+  it("does not let anonymous /signup mint scopes when signupScopes is unset", async () => {
+    const res = await fetch(`${base}/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: "attacker@evil.com",
+        scopes: ["admin"],
+        budget_cents: null,
+        expires_in: "365d",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("issues a scopeless (not unlimited) key when /signup omits scopes", async () => {
+    const res = await fetch(`${base}/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "user@example.com" }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.scopes).toEqual([]);
+  });
+
+  it("maps a malformed expires_in to 400, not 500", async () => {
+    const res = await fetch(`${base}/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "user@example.com", expires_in: "abc" }),
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("routes (signup with configured scopes)", () => {
+  let server: Server;
+  let base: string;
+
+  beforeAll(() => {
+    const app = express();
+    app.use(express.json());
+    app.use(createAgentKeyRoutes(ak, { signupScopes: ["read"] }));
+    server = app.listen(0);
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    base = `http://localhost:${port}`;
+  });
+
+  afterAll(() => {
+    server.close();
+  });
+
+  it("allows a configured scope and rejects anything else", async () => {
+    const ok = await fetch(`${base}/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "user@example.com", scopes: ["read"] }),
+    });
+    expect(ok.status).toBe(201);
+
+    const bad = await fetch(`${base}/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "user@example.com", scopes: ["admin"] }),
+    });
+    expect(bad.status).toBe(400);
   });
 });

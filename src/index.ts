@@ -24,14 +24,16 @@ export { createAgentKeyRoutes } from "./routes.js";
 export type { RouteOptions } from "./routes.js";
 
 function parseDuration(dur: string): number {
-  const match = dur.match(/^(\d+)(h|d|m)$/);
+  // Note: "m" is minutes (the common convention); use "mo" for a ~30-day month.
+  const match = dur.match(/^(\d+)(mo|h|d|m)$/);
   if (!match) throw new Error(`Invalid duration: ${dur}`);
   const n = parseInt(match[1], 10);
   const unit = match[2];
+  if (unit === "m") return n * 60 * 1000;
   if (unit === "h") return n * 60 * 60 * 1000;
   if (unit === "d") return n * 24 * 60 * 60 * 1000;
-  if (unit === "m") return n * 30 * 24 * 60 * 60 * 1000;
-  throw new Error(`Unknown unit: ${unit}`);
+  if (unit === "mo") return n * 30 * 24 * 60 * 60 * 1000;
+  throw new Error(`Invalid duration: ${dur}`);
 }
 
 function nextCalendarMonth(from: Date): Date {
@@ -202,7 +204,7 @@ export class AgentKey {
       budgetResetAt: row.budget_reset_at?.toISOString() ?? null,
       expiresAt: row.expires_at?.toISOString() ?? null,
       delegatedBy: row.delegated_by ?? null,
-      name: row.name,
+      name: row.name ?? "default",
     };
   }
 
@@ -210,6 +212,10 @@ export class AgentKey {
     rawKey: string,
     opts: { costCents: number },
   ): Promise<TrackUsageResult> {
+    if (!Number.isFinite(opts.costCents)) {
+      return { success: false, reason: "invalid_cost" };
+    }
+
     if (opts.costCents <= 0) {
       return { success: true, budgetUsedCents: 0, budgetRemainingCents: null };
     }
