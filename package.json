@@ -30,9 +30,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/katrinavassell/agentkey.git"
+    "url": "git+https://github.com/katrinalaszlo/agentkey.git"
   },
-  "homepage": "https://github.com/katrinavassell/agentkey#readme",
+  "homepage": "https://github.com/katrinalaszlo/agentkey#readme",
   "peerDependencies": {
     "pg": ">=8.0.0",
     "express": ">=4.0.0"

@@ -16,13 +16,13 @@ What happens when a customer or user wants to control or limit usage by API key,
 ## Install
 
 ```bash
-npm install agentkey
+npm install @katrinalaszlo/agentkey
 ```
 
 ## Quick Start
 
 ```typescript
-import { AgentKey } from 'agentkey';
+import { AgentKey } from '@katrinalaszlo/agentkey';
 
 const ak = new AgentKey({ pool }); // pass your pg Pool
 
@@ -114,7 +114,7 @@ Soft-revoke a key (sets revoked_at timestamp).
 ## Express Middleware
 
 ```typescript
-import { agentKeyMiddleware } from 'agentkey/express';
+import { agentKeyMiddleware } from '@katrinalaszlo/agentkey/express';
 
 // Protect routes with scope checks
 app.get('/api/usage', agentKeyMiddleware(ak, { scope: 'usage.read' }), handler);
@@ -152,7 +152,7 @@ Run `ak.migrate()` to apply automatically, or use the SQL above in your own migr
 
 ## Built At
 
-Extracted from [Observe](https://github.com/katrinavassell/observe), an open-source AI cost observability platform. Battle-tested on real agent traffic before being packaged as a standalone library.
+Extracted from [Observe](https://github.com/katrinalaszlo/observe), an open-source AI cost observability platform. Battle-tested on real agent traffic before being packaged as a standalone library.
 
 ## License
 
