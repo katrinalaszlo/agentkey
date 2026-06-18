@@ -6,7 +6,9 @@ Scoped, budgeted, time-bounded API keys for AI agents.
 
 When I led self-serve at a usage-based data company, one of the most common requests was credit limits per API key. Users have asked for the same at Tanso. Account- and user-level limits are critical for enterprises, but they're heavy. What's the simple version for startups?
 
-agentkey is that: scope what a key can do, cap what it can spend, set when it expires, and record which human authorized it. It adds a few columns to your existing keys table — it doesn't replace your auth.
+agentkey is that: cap what a key can spend, scope what it can do, set when it expires, and record which human authorized it. It adds a few columns to your existing keys table — it doesn't replace your auth.
+
+Scoped keys control what an agent can do, not how much it can spend. agentkey does both, per key. LLM gateways cap spend; identity platforms scope keys; neither does both at the key level.
 
 ## What it covers
 
