@@ -221,36 +221,42 @@ export class AgentKey {
     }
 
     const keyHash = crypto.createHash("sha256").update(rawKey).digest("hex");
+    const costRounded = Math.round(opts.costCents);
 
+    // Atomic check-and-increment. The budget guard lives in the WHERE clause so
+    // concurrent charges serialize on the row lock and re-evaluate against the
+    // committed balance — a SELECT-then-UPDATE here would let parallel requests
+    // each read the old balance and overspend the cap.
     const result = await this.pool.query(
-      `SELECT id, budget_cents, budget_used_cents FROM ${this.tableName}
-       WHERE key_hash = $1 AND revoked_at IS NULL`,
-      [keyHash],
+      `UPDATE ${this.tableName}
+       SET budget_used_cents = COALESCE(budget_used_cents, 0) + $1
+       WHERE key_hash = $2 AND revoked_at IS NULL
+         AND (budget_cents IS NULL
+              OR COALESCE(budget_used_cents, 0) + $1 <= budget_cents)
+       RETURNING budget_used_cents, budget_cents`,
+      [costRounded, keyHash],
     );
 
     if (result.rows.length === 0) {
-      return { success: false, reason: "invalid_key" };
+      // No row updated: either the key is gone/revoked, or the charge would
+      // exceed the budget. Distinguish the two for the caller.
+      const check = await this.pool.query(
+        `SELECT 1 FROM ${this.tableName} WHERE key_hash = $1 AND revoked_at IS NULL`,
+        [keyHash],
+      );
+      return {
+        success: false,
+        reason: check.rows.length === 0 ? "invalid_key" : "budget_exceeded",
+      };
     }
 
     const row = result.rows[0];
-    const costRounded = Math.round(opts.costCents);
-    const newUsed = (row.budget_used_cents ?? 0) + costRounded;
-
-    if (row.budget_cents != null && newUsed > row.budget_cents) {
-      return { success: false, reason: "budget_exceeded" };
-    }
-
-    await this.pool.query(
-      `UPDATE ${this.tableName} SET budget_used_cents = COALESCE(budget_used_cents, 0) + $1 WHERE id = $2`,
-      [costRounded, row.id],
-    );
-
     return {
       success: true,
-      budgetUsedCents: newUsed,
+      budgetUsedCents: row.budget_used_cents,
       budgetRemainingCents:
         row.budget_cents != null
-          ? Math.max(0, row.budget_cents - newUsed)
+          ? Math.max(0, row.budget_cents - row.budget_used_cents)
           : null,
     };
   }

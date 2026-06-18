@@ -243,6 +243,29 @@ describe("trackUsage", () => {
     expect(r.success).toBe(false);
     expect(r.reason).toBe("invalid_cost");
   });
+
+  // Regression: trackUsage did SELECT-then-UPDATE, so concurrent charges all
+  // read the old balance and overspent the cap (a 100c budget hit 400c under
+  // 20-way concurrency). Found by /qa on 2026-06-18.
+  it("never overspends the budget under concurrent charges", async () => {
+    const created = await ak.create({
+      accountId: "acct_race",
+      budgetCents: 100,
+    });
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        ak.trackUsage(created.key, { costCents: 20 }),
+      ),
+    );
+    const succeeded = results.filter((r) => r.success).length;
+    expect(succeeded).toBe(5); // exactly 100 / 20, never more
+
+    const row = await pool.query(
+      "SELECT budget_used_cents FROM sdk_api_keys WHERE id = $1",
+      [created.id],
+    );
+    expect(row.rows[0].budget_used_cents).toBe(100);
+  });
 });
 
 describe("hasScope", () => {
