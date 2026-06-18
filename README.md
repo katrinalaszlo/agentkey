@@ -151,10 +151,6 @@ Run `ak.migrate()` to apply automatically, or use the SQL above in your own migr
 
 **Custom code**: This is what everyone builds. It takes weeks, it's different at every company, it has bugs.
 
-## Built At
-
-Extracted from [Observe](https://github.com/katrinalaszlo/observe), an open-source AI cost observability platform. Battle-tested on real agent traffic before being packaged as a standalone library.
-
 ## License
 
 MIT
