@@ -123,6 +123,37 @@ describe("validate", () => {
     if (result.valid) return;
     expect(result.reason).toBe("expired");
   });
+
+  // Regression: budget reset never fired for an exhausted key because the
+  // budget_exceeded check ran before the reset. Found by /qa on 2026-06-18.
+  it("resets an exhausted budget once the period rolls over", async () => {
+    const created = await ak.create({
+      accountId: "acct_test_reset",
+      budgetCents: 100,
+      budgetPeriod: "day",
+    });
+    await ak.trackUsage(created.key, { costCents: 100 });
+
+    // Within the period, the exhausted key is still blocked.
+    const blocked = await ak.validate(created.key);
+    expect(blocked.valid).toBe(false);
+    if (blocked.valid) return;
+    expect(blocked.reason).toBe("budget_exceeded");
+
+    // Simulate several days passing.
+    await pool.query(
+      "UPDATE sdk_api_keys SET budget_reset_at = NOW() - INTERVAL '5 days' WHERE id = $1",
+      [created.id],
+    );
+
+    const result = await ak.validate(created.key);
+    expect(result.valid).toBe(true);
+    if (!result.valid) return;
+    expect(result.budgetUsedCents).toBe(0);
+    expect(result.budgetRemainingCents).toBe(100);
+    // New reset date must be in the future, not the stale past date.
+    expect(new Date(result.budgetResetAt!).getTime()).toBeGreaterThan(Date.now());
+  });
 });
 
 describe("trackUsage", () => {

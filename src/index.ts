@@ -148,19 +148,18 @@ export class AgentKey {
       return { valid: false, reason: "expired" };
     }
 
-    if (
-      row.budget_cents != null &&
-      (row.budget_used_cents ?? 0) >= row.budget_cents
-    ) {
-      return { valid: false, reason: "budget_exceeded" };
-    }
-
+    // Reset the budget BEFORE the exceeded check, otherwise a key that
+    // exhausted last period stays locked forever once the period rolls over.
     if (row.budget_reset_at && new Date(row.budget_reset_at) < new Date()) {
-      const resetFrom = new Date(row.budget_reset_at);
-      const newResetAt =
-        row.budget_period === "month"
-          ? nextCalendarMonth(resetFrom)
-          : nextDay(resetFrom);
+      let newResetAt = new Date(row.budget_reset_at);
+      const now = new Date();
+      // Advance past every elapsed period so the new reset is in the future.
+      do {
+        newResetAt =
+          row.budget_period === "month"
+            ? nextCalendarMonth(newResetAt)
+            : nextDay(newResetAt);
+      } while (newResetAt < now);
 
       await this.pool.query(
         `UPDATE ${this.tableName} SET budget_used_cents = 0, budget_reset_at = $1 WHERE id = $2`,
@@ -168,6 +167,13 @@ export class AgentKey {
       );
       row.budget_used_cents = 0;
       row.budget_reset_at = newResetAt;
+    }
+
+    if (
+      row.budget_cents != null &&
+      (row.budget_used_cents ?? 0) >= row.budget_cents
+    ) {
+      return { valid: false, reason: "budget_exceeded" };
     }
 
     // Fire-and-forget last_used_at update
