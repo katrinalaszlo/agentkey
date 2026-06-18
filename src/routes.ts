@@ -98,10 +98,36 @@ export function createAgentKeyRoutes(
         const { scopes, budget_cents, budget_period, expires_in, name } =
           req.body;
 
+        // A key may only grant scopes it already holds. Otherwise a
+        // read-only key could mint an admin (or unlimited) key for its
+        // own account.
+        const callerScopes = req.agentKey.scopes;
+        const callerIsLimited =
+          callerScopes !== null && !callerScopes.includes("admin");
+        let childScopes: string[] | null = Array.isArray(scopes)
+          ? scopes
+          : null;
+        if (callerIsLimited) {
+          if (childScopes === null) {
+            // Don't let an unspecified request become an unlimited key —
+            // inherit the caller's own scopes instead.
+            childScopes = callerScopes;
+          } else {
+            const disallowed = childScopes.filter(
+              (s) => !callerScopes!.includes(s),
+            );
+            if (disallowed.length > 0) {
+              return res.status(403).json({
+                error: `Cannot grant scopes you do not have: ${disallowed.join(", ")}`,
+              });
+            }
+          }
+        }
+
         const key = await ak.create({
           accountId: req.agentKey.accountId,
           userId: req.agentKey.userId,
-          scopes: scopes ?? null,
+          scopes: childScopes,
           budgetCents: budget_cents ?? null,
           budgetPeriod: budget_period ?? null,
           expiresIn: expires_in ?? null,
@@ -127,11 +153,19 @@ export function createAgentKeyRoutes(
     agentKeyMiddleware(ak),
     async (req: Request, res: Response) => {
       try {
+        if (!req.agentKey) {
+          return res.status(401).json({ error: "Authentication required" });
+        }
         const keyId = parseInt(req.params.id, 10);
         if (isNaN(keyId)) {
           return res.status(400).json({ error: "Invalid key ID" });
         }
-        await ak.revoke(keyId);
+        // Scope revocation to the caller's account so one key can't revoke
+        // another account's keys by guessing sequential IDs.
+        const revoked = await ak.revoke(keyId, req.agentKey.accountId);
+        if (!revoked) {
+          return res.status(404).json({ error: "Key not found" });
+        }
         res.json({ revoked: true });
       } catch (error) {
         console.error("DELETE /sdk-keys/:id error:", error);

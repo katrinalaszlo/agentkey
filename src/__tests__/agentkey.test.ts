@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import pg from "pg";
-import { AgentKey } from "../index.js";
+import express from "express";
+import type { Server } from "http";
+import { AgentKey, createAgentKeyRoutes } from "../index.js";
 
 const TEST_DB =
   process.env.DATABASE_URL ??
@@ -228,5 +230,125 @@ describe("hasScope", () => {
     expect(ak.hasScope(result, "read")).toBe(true);
     expect(ak.hasScope(result, "write")).toBe(true);
     expect(ak.hasScope(result, "anything")).toBe(true);
+  });
+});
+
+describe("revoke", () => {
+  // Regression: revoke had no account scoping, so any key could revoke any
+  // other key by ID. Found by /qa on 2026-06-18.
+  it("only revokes a key the given account owns", async () => {
+    const victim = await ak.create({ accountId: "acct_owner" });
+
+    const wrongAccount = await ak.revoke(victim.id, "acct_attacker");
+    expect(wrongAccount).toBe(false);
+    const stillValid = await ak.validate(victim.key);
+    expect(stillValid.valid).toBe(true);
+
+    const rightAccount = await ak.revoke(victim.id, "acct_owner");
+    expect(rightAccount).toBe(true);
+    const nowRevoked = await ak.validate(victim.key);
+    expect(nowRevoked.valid).toBe(false);
+  });
+});
+
+describe("routes (security)", () => {
+  let server: Server;
+  let base: string;
+
+  beforeAll(async () => {
+    const app = express();
+    app.use(express.json());
+    app.use(createAgentKeyRoutes(ak));
+    server = app.listen(0);
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    base = `http://localhost:${port}`;
+  });
+
+  afterAll(() => {
+    server.close();
+  });
+
+  const auth = (key: string) => ({
+    Authorization: `Bearer ${key}`,
+    "Content-Type": "application/json",
+  });
+
+  // Regression: DELETE /sdk-keys/:id let any key revoke any other account's
+  // key by guessing sequential IDs (IDOR). Found by /qa on 2026-06-18.
+  it("does not let one account revoke another account's key", async () => {
+    const attacker = await ak.create({
+      accountId: "acct_A",
+      scopes: ["read"],
+    });
+    const victim = await ak.create({ accountId: "acct_B", scopes: ["write"] });
+
+    const res = await fetch(`${base}/sdk-keys/${victim.id}`, {
+      method: "DELETE",
+      headers: auth(attacker.key),
+    });
+    expect(res.status).toBe(404);
+
+    const check = await ak.validate(victim.key);
+    expect(check.valid).toBe(true);
+  });
+
+  it("lets an account revoke its own key", async () => {
+    const owner = await ak.create({ accountId: "acct_self", scopes: ["read"] });
+    const own = await ak.create({ accountId: "acct_self", scopes: ["read"] });
+
+    const res = await fetch(`${base}/sdk-keys/${own.id}`, {
+      method: "DELETE",
+      headers: auth(owner.key),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  // Regression: POST /sdk-keys let a key mint a key with scopes it didn't
+  // hold (privilege escalation). Found by /qa on 2026-06-18.
+  it("rejects minting a key with scopes the caller lacks", async () => {
+    const limited = await ak.create({
+      accountId: "acct_lim",
+      scopes: ["read"],
+    });
+
+    const res = await fetch(`${base}/sdk-keys`, {
+      method: "POST",
+      headers: auth(limited.key),
+      body: JSON.stringify({ scopes: ["admin"] }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("inherits caller scopes instead of going unlimited when scopes omitted", async () => {
+    const limited = await ak.create({
+      accountId: "acct_inherit",
+      scopes: ["read"],
+    });
+
+    const res = await fetch(`${base}/sdk-keys`, {
+      method: "POST",
+      headers: auth(limited.key),
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.scopes).toEqual(["read"]);
+  });
+
+  it("allows minting a key with a subset of caller scopes", async () => {
+    const caller = await ak.create({
+      accountId: "acct_subset",
+      scopes: ["read", "write"],
+    });
+
+    const res = await fetch(`${base}/sdk-keys`, {
+      method: "POST",
+      headers: auth(caller.key),
+      body: JSON.stringify({ scopes: ["read"] }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.scopes).toEqual(["read"]);
   });
 });

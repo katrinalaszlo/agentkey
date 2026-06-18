@@ -107,9 +107,9 @@ Increment budget usage. Returns `{ success: false, reason: 'budget_exceeded' }` 
 
 Check if a validated key has a specific scope. Returns boolean.
 
-### `ak.revoke(keyId)`
+### `ak.revoke(keyId, accountId?)`
 
-Soft-revoke a key (sets revoked_at timestamp).
+Soft-revoke a key (sets revoked_at timestamp). Returns `true` if a key was revoked, `false` if nothing matched. Pass `accountId` to only revoke a key that account owns — the built-in `DELETE /sdk-keys/:id` route does this so one key can't revoke another account's keys by guessing IDs.
 
 ## Express Middleware
 

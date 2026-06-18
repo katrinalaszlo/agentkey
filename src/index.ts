@@ -254,10 +254,21 @@ export class AgentKey {
     return result.scopes.includes(scope) || result.scopes.includes("admin");
   }
 
-  async revoke(keyId: number): Promise<void> {
-    await this.pool.query(
-      `UPDATE ${this.tableName} SET revoked_at = NOW() WHERE id = $1`,
-      [keyId],
-    );
+  async revoke(keyId: number, accountId?: string | number): Promise<boolean> {
+    // When accountId is given, only revoke a key the caller actually owns.
+    // Without it, no account check is performed (server-side/admin use only).
+    const result =
+      accountId != null
+        ? await this.pool.query(
+            `UPDATE ${this.tableName} SET revoked_at = NOW()
+             WHERE id = $1 AND account_id = $2 AND revoked_at IS NULL`,
+            [keyId, accountId],
+          )
+        : await this.pool.query(
+            `UPDATE ${this.tableName} SET revoked_at = NOW()
+             WHERE id = $1 AND revoked_at IS NULL`,
+            [keyId],
+          );
+    return (result.rowCount ?? 0) > 0;
   }
 }
