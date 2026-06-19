@@ -5,6 +5,7 @@ import type {
   AgentKeyOptions,
   CreateKeyOptions,
   CreateKeyResult,
+  EnsureSubjectOptions,
   ValidateResult,
   ValidateFailure,
   TrackUsageResult,
@@ -14,6 +15,7 @@ export type {
   AgentKeyOptions,
   CreateKeyOptions,
   CreateKeyResult,
+  EnsureSubjectOptions,
   ValidateResult,
   ValidateFailure,
   TrackUsageResult,
@@ -151,14 +153,94 @@ export class AgentKey {
     };
   }
 
+  // Create-on-first-seen a budget row anchored to an external identity (e.g. a
+  // Clerk M2M machine id). Idempotent: a second call for the same subject is a
+  // no-op via ON CONFLICT, so concurrent first requests can't double-insert.
+  // No ak_ token is issued — the external credential (the Clerk M2M token) is
+  // the bearer; this row only holds the scope/budget/expiry agentkey enforces.
+  async ensureSubject(
+    subject: string,
+    opts: EnsureSubjectOptions = {},
+  ): Promise<void> {
+    if (opts.scopes && this.validScopes) {
+      const check = this.validateScopes(opts.scopes);
+      if (!check.valid) {
+        throw new Error(`Invalid scopes: ${check.invalid!.join(", ")}`);
+      }
+    }
+
+    if (
+      opts.budgetPeriod != null &&
+      opts.budgetPeriod !== "day" &&
+      opts.budgetPeriod !== "month"
+    ) {
+      throw new Error(`Invalid budget period: ${opts.budgetPeriod}`);
+    }
+
+    // key_hash is NOT NULL UNIQUE, but a subject-bound row is never looked up by
+    // hash. Give it a unique random value that is never returned to anyone.
+    const internalHash = crypto.randomBytes(32).toString("hex");
+    const internalPrefix = `${this.keyPrefix}ext`;
+
+    const expiresAt = opts.expiresIn
+      ? new Date(Date.now() + parseDuration(opts.expiresIn))
+      : null;
+
+    const now = new Date();
+    const budgetResetAt =
+      opts.budgetPeriod === "month"
+        ? nextCalendarMonth(now)
+        : opts.budgetPeriod === "day"
+          ? nextDay(now)
+          : null;
+
+    await this.pool.query(
+      `INSERT INTO ${this.tableName}
+        (account_id, user_id, key_hash, key_prefix, name, scopes, budget_cents, budget_used_cents,
+         budget_period, budget_reset_at, expires_at, delegated_by, external_subject)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10, $11, $12)
+       ON CONFLICT (external_subject) WHERE external_subject IS NOT NULL DO NOTHING`,
+      [
+        opts.accountId ?? subject,
+        opts.userId ?? null,
+        internalHash,
+        internalPrefix,
+        opts.name ?? "default",
+        opts.scopes ?? null,
+        opts.budgetCents ?? null,
+        opts.budgetPeriod ?? null,
+        budgetResetAt,
+        expiresAt,
+        opts.delegatedBy ?? null,
+        subject,
+      ],
+    );
+  }
+
   async validate(rawKey: string): Promise<ValidateResult | ValidateFailure> {
     const keyHash = crypto.createHash("sha256").update(rawKey).digest("hex");
+    return this.validateByColumn("key_hash", keyHash);
+  }
 
+  // Validate a budget row bound to an external identity (e.g. a Clerk M2M
+  // machine id) via ensureSubject, instead of a raw ak_ key.
+  async validateBySubject(
+    subject: string,
+  ): Promise<ValidateResult | ValidateFailure> {
+    return this.validateByColumn("external_subject", subject);
+  }
+
+  // Shared validation core. `column` is an internal literal ("key_hash" |
+  // "external_subject"), never user input, so interpolating it is injection-safe.
+  private async validateByColumn(
+    column: "key_hash" | "external_subject",
+    value: string,
+  ): Promise<ValidateResult | ValidateFailure> {
     const result = await this.pool.query(
       `SELECT id, account_id, user_id, name, scopes, budget_cents, budget_used_cents,
               budget_period, budget_reset_at, expires_at, delegated_by, revoked_at
-       FROM ${this.tableName} WHERE key_hash = $1`,
-      [keyHash],
+       FROM ${this.tableName} WHERE ${column} = $1`,
+      [value],
     );
 
     if (result.rows.length === 0) {
@@ -253,20 +335,38 @@ export class AgentKey {
     rawKey: string,
     opts: { costCents: number },
   ): Promise<TrackUsageResult> {
-    if (!Number.isFinite(opts.costCents)) {
+    const keyHash = crypto.createHash("sha256").update(rawKey).digest("hex");
+    return this.trackUsageByColumn("key_hash", keyHash, opts.costCents);
+  }
+
+  // Charge a budget row bound to an external identity (e.g. a Clerk M2M machine
+  // id) via ensureSubject, instead of a raw ak_ key.
+  async trackUsageBySubject(
+    subject: string,
+    opts: { costCents: number },
+  ): Promise<TrackUsageResult> {
+    return this.trackUsageByColumn("external_subject", subject, opts.costCents);
+  }
+
+  // Shared charge core. `column` is an internal literal, never user input.
+  private async trackUsageByColumn(
+    column: "key_hash" | "external_subject",
+    value: string,
+    costCents: number,
+  ): Promise<TrackUsageResult> {
+    if (!Number.isFinite(costCents)) {
       return { success: false, reason: "invalid_cost" };
     }
 
-    if (opts.costCents <= 0) {
+    if (costCents <= 0) {
       // No-op charge. Don't fabricate budget numbers: a SELECT-free shortcut
       // would otherwise report "0 used / unlimited remaining" for a capped key.
       return { success: true };
     }
 
-    const keyHash = crypto.createHash("sha256").update(rawKey).digest("hex");
     // Round up: a positive sub-cent cost must consume at least one whole cent,
     // not round to a free $0 charge (whole cents is the schema's billing unit).
-    const costRounded = Math.ceil(opts.costCents);
+    const costRounded = Math.ceil(costCents);
 
     // Next period boundary measured from now. A single step is always in the
     // future even if several periods elapsed since the key was last touched.
@@ -289,18 +389,18 @@ export class AgentKey {
            budget_reset_at = CASE WHEN ${rolled}
              THEN (CASE WHEN budget_period = 'month' THEN $4::timestamptz ELSE $3::timestamptz END)
              ELSE budget_reset_at END
-       WHERE key_hash = $2 AND revoked_at IS NULL
+       WHERE ${column} = $2 AND revoked_at IS NULL
          AND (budget_cents IS NULL OR (${baseUsed}) + $1 <= budget_cents)
        RETURNING budget_used_cents, budget_cents`,
-      [costRounded, keyHash, nextDayReset, nextMonthReset],
+      [costRounded, value, nextDayReset, nextMonthReset],
     );
 
     if (result.rows.length === 0) {
       // No row updated: either the key is gone/revoked, or the charge would
       // exceed the budget. Distinguish the two for the caller.
       const check = await this.pool.query(
-        `SELECT 1 FROM ${this.tableName} WHERE key_hash = $1 AND revoked_at IS NULL`,
-        [keyHash],
+        `SELECT 1 FROM ${this.tableName} WHERE ${column} = $1 AND revoked_at IS NULL`,
+        [value],
       );
       return {
         success: false,

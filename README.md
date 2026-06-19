@@ -121,6 +121,16 @@ Check if a validated key has a specific scope. Returns boolean.
 
 Soft-revoke a key (sets revoked_at timestamp). Returns `true` if a key was revoked, `false` if nothing matched. Pass `accountId` to only revoke a key that account owns — the built-in `DELETE /sdk-keys/:id` route does this so one key can't revoke another account's keys by guessing IDs.
 
+### External-subject keys (`ak.ensureSubject` / `ak.validateBySubject` / `ak.trackUsageBySubject`)
+
+For agents that already carry a credential from an identity provider (e.g. a [Clerk M2M token](https://clerk.com/docs/guides/development/machine-auth/m2m-tokens)), you can anchor a budget row to that external identity instead of minting an `ak_` key. Same budget/scope/expiry enforcement, keyed on the external subject.
+
+- `ak.ensureSubject(subject, options?)` — create-on-first-seen a budget row for an external identity. Idempotent (a second call is a no-op). `options` takes the same `scopes`/`budgetCents`/`budgetPeriod`/`expiresIn`/`delegatedBy`/`name` as `create`, plus optional `accountId` (defaults to the subject). Returns nothing — no token is issued; the external credential is the bearer.
+- `ak.validateBySubject(subject)` — same as `validate`, keyed on the external subject.
+- `ak.trackUsageBySubject(subject, { costCents })` — same as `trackUsage`, keyed on the external subject.
+
+These power [`@katrinalaszlo/agentkey-clerk`](https://github.com/katrinalaszlo/agentkey-clerk). Requires running `ak.migrate()` (adds the `external_subject` column).
+
 ## Express Middleware
 
 ```typescript
@@ -165,6 +175,12 @@ ALTER TABLE sdk_api_keys
 ```
 
 Run `ak.migrate()` to apply automatically, or use the SQL above in your own migration system.
+
+## Use with Clerk
+
+If your agents authenticate with [Clerk M2M tokens](https://clerk.com/docs/guides/development/machine-auth/m2m-tokens), you don't need to mint a separate `ak_` key. [`@katrinalaszlo/agentkey-clerk`](https://github.com/katrinalaszlo/agentkey-clerk) is a drop-in middleware that verifies the Clerk token and enforces an agentkey budget/scope/expiry on the machine behind it — Clerk says which machine is calling, agentkey says how much it can spend. The agent keeps carrying its Clerk token; the spend layer rides on top.
+
+The subject-keyed methods that power it (`ensureSubject`, `validateBySubject`, `trackUsageBySubject`) are part of agentkey's API and can be used directly against any external identity, not just Clerk.
 
 ## Why Not Just Use...
 

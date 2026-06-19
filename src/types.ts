@@ -18,6 +18,21 @@ export interface CreateKeyOptions {
   name?: string;
 }
 
+// Options for a budget row bound to an external identity (e.g. a Clerk M2M
+// machine id). Same knobs as CreateKeyOptions, but accountId is optional
+// (defaults to the subject) because the external identity is the anchor and no
+// ak_ key is minted.
+export interface EnsureSubjectOptions {
+  accountId?: string | number;
+  userId?: string | null;
+  scopes?: string[] | null;
+  budgetCents?: number | null;
+  budgetPeriod?: "day" | "month" | null;
+  expiresIn?: string | null;
+  delegatedBy?: string | null;
+  name?: string;
+}
+
 export interface CreateKeyResult {
   key: string;
   id: number;
